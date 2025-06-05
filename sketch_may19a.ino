@@ -62,7 +62,7 @@ void setup() {
     Serial.println("SSD1306 init failed!");
     while (true);
   }
-
+  
   display.clearDisplay();
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
@@ -95,17 +95,21 @@ void connectToWiFi() {
   Serial.printf("[WiFi] Connecting to %s\n", ssid);
   WiFi.begin(ssid, password);
   unsigned long start = millis();
+
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
     delay(500);
     Serial.print(".");
   }
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\n[WiFi] Connected.");
   } else {
     Serial.println("\n[WiFi] Failed to connect!");
-    while (true) delay(1000);
+    delay(3000);
+    ESP.restart();  // 👉 Tự khởi động lại ESP32
   }
 }
+
 
 void setupWebSocket() {
   webSocket.begin(ws_host, ws_port, ws_path);
@@ -126,9 +130,6 @@ void loop() {
 // Check bãi đỗ đầy
 void checkFullStatus() {
   isFull = a1LastState && a2LastState && a3LastState && a4LastState && b1LastState && b2LastState;
-  if (isFull) {
-    Serial.println("[SYSTEM] Bãi đỗ FULL.");
-  }
 }
 
 // Cập nhật trạng thái từng vị trí
@@ -164,6 +165,7 @@ void sendSlotStatus(const char* slot, bool inUse) {
 
 // Phát hiện xe vào
 void handleDetection() {
+  if (isFull) return;
   bool detectionNow = (digitalRead(IR_SENSOR_PIN) == LOW);
   unsigned long currentMillis = millis();
   if (detectionNow) {
@@ -218,44 +220,49 @@ void handleServoReset() {
   }
 }
 
+
 // OLED Hiển thị
 void handleDisplay() {
   display.clearDisplay();
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-
-  display.setCursor(0, 0);
+  display.setCursor(10, 0);
   display.print("|"); display.print(a1LastState ? "X" : "O");
   display.print("| A |"); display.print(a2LastState ? "X" : "O"); display.print("|");
 
-  display.setCursor(0, 22);
+  display.setCursor(10, 22);
   display.print("|"); display.print(a3LastState ? "X" : "O");
   display.print("|   |"); display.print(a4LastState ? "X" : "O"); display.print("|");
 
-  display.setCursor(0, 44);
+  display.setCursor(10, 44);
   display.print("|"); display.print(b1LastState ? "X" : "O");
   display.print("| B |"); display.print(b2LastState ? "X" : "O"); display.print("|");
 
   display.display();
 }
+String base64Buffer = "";
+int expectedChunks = -1;
+int receivedChunks = 0;
 
 // WebSocket Xử lý
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   if (type == WStype_TEXT) {
-    Serial.printf("[WS] Received: %s\n", payload);
-    StaticJsonDocument<1024> doc;
+    Serial.printf("[WS] Received text: %s\n", payload);
+
+    DynamicJsonDocument doc(2048);  // đủ lớn để chứa cả base64 QR
     DeserializationError error = deserializeJson(doc, payload);
+
     if (error) {
-      Serial.print("[JSON] Parse error: ");
+      Serial.print(F("[WS] JSON parse failed: "));
       Serial.println(error.c_str());
       return;
     }
-
+    
     const char* event = doc["event"];
     const char* command = doc["command"];
     const char* target = doc["target"];
 
-    if (strcmp(command, "rotate") == 0) {
+    if (command && strcmp(command, "rotate") == 0) {
       if (target) {
         if (strcmp(target, "in") == 0 && !servoInRotated) {
           rotateServo(servoIn, servoInRotated, "[Servo In]");
@@ -264,14 +271,29 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         } else {
           Serial.println("[WS] Invalid target or already rotated");
         }
+      } else {
+        Serial.println("[WS] Missing target in rotate command");
       }
     }
+
   } else if (type == WStype_CONNECTED) {
     Serial.println("[WS] Connected to server");
+
+    // Gửi thông điệp định danh
+    StaticJsonDocument<128> doc;
+    doc["event"] = "register_device";
+    doc["type"] = "esp";         // thông báo đây là ESP
+    doc["location"] = "gate_1";  // tùy chọn: có thể thêm vị trí
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    webSocket.sendTXT(jsonStr);
+
   } else if (type == WStype_DISCONNECTED) {
     Serial.println("[WS] Disconnected");
   }
 }
+
 
 void rotateServo(Servo& servo, bool& rotatedFlag, const char* logPrefix) {
   Serial.printf("%s Rotating 90 degrees\n", logPrefix);
